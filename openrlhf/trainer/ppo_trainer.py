@@ -236,7 +236,7 @@ class PPOTrainer(ABC):
         dataloader = DataLoader(
             self.replay_buffer,
             batch_size=self.replay_buffer.sample_batch_size,
-            shuffle=True,
+            shuffle=False,
             drop_last=True,
             pin_memory=self.dataloader_pin_memory,
             collate_fn=self.replay_buffer.collate_fn,
@@ -332,6 +332,13 @@ class PPOTrainer(ABC):
             packed_seq_lens=packed_seq_lens,
         )
 
+        if isinstance(experience.sequences, list):
+            print(
+                f"[{torch.distributed.get_rank()}] action_log_probs: {action_log_probs[0, :experience.sequences[0].numel()]}"
+            )
+        else:
+            print(f"[{torch.distributed.get_rank()}] action_log_probs: {action_log_probs[0]}")
+
         # loss function
         actor_loss = self.actor_loss_fn(
             action_log_probs,
@@ -417,6 +424,10 @@ class PPOTrainer(ABC):
             return_output=True,
             packed_seq_lens=packed_seq_lens,
         )
+        if isinstance(experience.sequences, list):
+            print(f"[{torch.distributed.get_rank()}] values: {values[0, :experience.sequences[0].numel()]}")
+        else:
+            print(f"[{torch.distributed.get_rank()}] values: {values[0]}")
         # loss function
         critic_loss = self.critic_loss_fn(
             values,

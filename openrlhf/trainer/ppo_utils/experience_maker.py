@@ -270,6 +270,7 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         self.actor.eval()
         device = torch.cuda.current_device()
 
+        print(f"[{torch.distributed.get_rank()}] prompt: {prompts[0]}")
         # generate sequence
         start = time.time()
         if not self.packing_samples:
@@ -282,12 +283,19 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             packed_seq_lens = None
             response_length = action_mask.float().sum(dim=-1)
             total_length = attention_mask.float().sum(dim=-1)
+            print(f"[{torch.distributed.get_rank()}] num_actions: {action_mask.sum(dim=-1).tolist()}")
         else:
             assert self.vllm_engines is not None, "vllm_engines must be provided for packed samples"
             sequences, attention_mask, packed_seq_lens, num_actions = self._generate_vllm(prompts, **generate_kwargs)
             action_mask = None
             response_length = torch.tensor(num_actions, device=device, dtype=torch.float)
             total_length = torch.tensor(packed_seq_lens, device=device, dtype=torch.float)
+            print(f"[{torch.distributed.get_rank()}] num_actions: {num_actions}")
+
+        print(
+            f"[{torch.distributed.get_rank()}] response_length: {response_length.tolist()}, total_length: {total_length.tolist()}"
+        )
+
         generate_time = time.time() - start
 
         sequences_cpu, attention_mask_cpu = (
@@ -382,6 +390,14 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
             generate_kwargs["lambd"],
         )
 
+        if not self.packing_samples:
+            print(f"[{torch.distributed.get_rank()}] kl: {kl.tolist()}, reward: {r.tolist()}")
+            print(f"[{torch.distributed.get_rank()}] advantage: {advantage[0].tolist()}")
+
+        else:
+            print(f"[{torch.distributed.get_rank()}] kl: {kl.tolist()}, reward: {r.tolist()}")
+            print(f"[{torch.distributed.get_rank()}] advantage: {advantage[0].tolist()}")
+
         info = {
             "kl": kl,
             "reward": r,
@@ -427,17 +443,23 @@ class RemoteExperienceMaker(NaiveExperienceMaker):
         llm = self.vllm_engines[rank % len(self.vllm_engines)]
 
         sampling_params = SamplingParams(
-            temperature=kwargs.get("temperature", 1.0),
-            top_p=kwargs.get("top_p", 1.0),
-            top_k=kwargs.get("top_k", -1),
+            # temperature=kwargs.get("temperature", 1.0),
+            # top_p=kwargs.get("top_p", 1.0),
+            # top_k=kwargs.get("top_k", -1),
             max_tokens=kwargs.get("max_new_tokens", 1024),
             min_tokens=kwargs.get("min_new_tokens", 1),
             skip_special_tokens=kwargs.get("skip_special_tokens", False),
+            best_of=1,
+            top_k=1,
         )
 
         # TODO: can't pass `max_length` to vLLM's tokenizer for input truncation, remove this once it is supported.
         prompt_token_ids = self.tokenize_fn(prompts, self.prompt_max_len, padding=False)["input_ids"]
         outputs = ray.get(llm.generate.remote(sampling_params=sampling_params, prompt_token_ids=prompt_token_ids))
+
+        print(
+            f"vllm_input: {[len(output.prompt_token_ids) for output in outputs]}, vllm_output: {[len(output.outputs[0].token_ids) for output in outputs]}"
+        )
 
         if not self.packing_samples:
             # NOTE: concat all outputs to following format:
