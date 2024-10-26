@@ -13,16 +13,35 @@ class GPTLMLoss(nn.Module):
     GPT Language Model Loss
     """
 
-    def __init__(self):
+    def __init__(self, group=None):
         super().__init__()
         self.IGNORE_INDEX = -100
-        self.loss = nn.CrossEntropyLoss(ignore_index=self.IGNORE_INDEX)
+        self.group = group
+        self.rank = dist.get_rank(group) if group is not None else 0
+        self.world_size = dist.get_world_size(group) if group is not None else 1
+        self.loss = nn.CrossEntropyLoss(
+            ignore_index=self.IGNORE_INDEX,
+            reduction="mean" if self.world_size == 1 else "sum",
+        )
 
     def forward(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = labels[..., 1:].contiguous()
-        # Flatten the tokens
-        return self.loss(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        if self.world_size == 1:
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # Flatten the tokens
+            return self.loss(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        else:
+            # Here we have the label of all ranks
+            total_seq_len = labels.numel()
+            local_seq_len = total_seq_len // self.world_size
+            local_shift_labels = labels[self.rank * local_seq_len + 1 : (self.rank + 1) * local_seq_len + 1]
+            if self.rank == self.world_size - 1:
+                logits = logits[..., :-1, :].contiguous()
+            loss = self.loss(logits.view(-1, logits.size(-1)), local_shift_labels.view(-1))
+            # This has the correct gradient.
+            loss = dist.nn.functional.all_reduce(loss, group=self.group)
+            loss = loss / (labels != self.loss_fn.IGNORE_INDEX).sum()
+            return loss
 
 
 class PolicyLoss(nn.Module):
